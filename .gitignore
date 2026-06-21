@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+#running_time
+./preprocessed
+./util/data/
+./util/preprocessed/
