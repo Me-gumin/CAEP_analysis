@@ -1,6 +1,6 @@
 # CAEP_analysis
 基于stream_lit搭建的快速可视化脑电信号数据
-
+# Usage
 ## step 1
 安装stream_lit `pip install streamlit`
 ## step 2
