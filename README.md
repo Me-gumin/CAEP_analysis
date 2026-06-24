@@ -6,7 +6,6 @@
 ## step 2
 clone this project `git clone https://github.com/Me-gumin/CAEP_analysis.git`
 ## step 3
-运行app.py
 <br>1.first `cd CAEP_analysis/util`</br>
 <br>2.then `streamlit run app.py`</br>
 
