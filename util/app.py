@@ -125,13 +125,33 @@ def load_features(sub_id):
         return None
     return extract_all_features(epochs)
 
+
 @st.cache_data
 def load_summary():
+    # 检查全局变量是否存在
+    if 'PREPROC_DIR' not in globals():
+        st.sidebar.error("系统错误：未设置数据目录 PREPROC_DIR")
+        return None
+
     path = f"{PREPROC_DIR}/summary.pkl"
-    if os.path.exists(path):
+
+    # 1. 检查文件是否存在
+    if not os.path.exists(path):
+        return None  # 没有文件就返回 None，不报错
+
+    # 2. 尝试读取，捕获所有可能的读取异常
+    try:
         with open(path, 'rb') as f:
-            return pickle.load(f)
-    return None
+            data = pickle.load(f)
+            # 简单校验一下数据格式，防止读出来是乱七八糟的东西
+            if isinstance(data, list):
+                return data
+            else:
+                return None
+    except (pickle.UnpicklingError, EOFError, AttributeError, ImportError, FileNotFoundError) as e:
+        # 在侧边栏显示温和的错误提示，而不中断整个页面
+        st.sidebar.warning(f"读取 summary.pkl 失败，请检查文件是否完整。错误信息: {e}")
+        return None
 
 # ==================== 自动预处理引擎 ====================
 def auto_preprocess_from_upload(file_map):
@@ -269,13 +289,201 @@ if st.sidebar.button("刷新数据列表", use_container_width=True):
     st.cache_resource.clear(); st.cache_data.clear()
     st.rerun()
 
+
+# ==================== 主界面 ====================
+st.title("CAEP 皮层听觉诱发电位 — 听力筛查分析系统")
+flag=0
+# ---- 上传新数据面板 (通过侧边栏按钮触发) ----
+if st.session_state.get('show_upload', False):
+    flag=1
+    #第一次上传
+    if summary is None or len(summary) == 0:
+        # ---- 无数据时: 显示上传引导页 ----
+        st.markdown("## 上传原始 EEG 数据开始分析")
+        st.markdown("支持 **BrainVision** (.vhdr+.eeg)、**EDF/BDF** (.edf)")
+
+        upload_tab1, upload_tab2 = st.tabs(["BrainVision", "EDF/BDF"])
+
+        with upload_tab1:
+            st.caption("上传 .vhdr 头文件 + .eeg 数据文件 (.vmrk 可选)")
+            bv1, bv2 = st.columns(2)
+            with bv1: vhdr_file = st.file_uploader(".vhdr (必需)", type=['vhdr'], key='main_vhdr')
+            with bv2: eeg_file = st.file_uploader(".eeg (必需)", type=['eeg'], key='main_eeg')
+            vmrk_file = st.file_uploader(".vmrk (可选, 未上传则用 events.tsv 或自动生成)", type=['vmrk'],
+                                         key='main_vmrk')
+            events_file = st.file_uploader("events.tsv (可选)", type=['tsv'], key='main_events')
+            ready = vhdr_file and eeg_file
+
+        with upload_tab2:
+            st.caption("上传单个 EDF/BDF 文件")
+            edf_file = st.file_uploader("选择 .edf 或 .bdf 文件", type=['edf', 'bdf'], key='main_edf')
+            ready = ready or bool(edf_file)
+
+        if ready:
+            if st.button("开始自动预处理", type="primary", use_container_width=True):
+                with st.status("自动预处理中...", expanded=True) as status:
+                    try:
+                        os.makedirs(f"{DATA_DIR}/_up/eeg", exist_ok=True)
+
+                        # 判断格式
+                        if edf_file:
+                            status.update(label="步骤 1/3: 读取 EDF/BDF 文件...")
+                            sub_name = edf_file.name.rsplit('.', 1)[0]
+                            tmp_edf = f"{DATA_DIR}/_up/{sub_name}.edf"
+                            with open(tmp_edf, 'wb') as f:
+                                f.write(edf_file.getbuffer())
+                            raw = mne.io.read_raw_edf(tmp_edf, preload=True, verbose=False)
+                        else:
+                            status.update(label="步骤 1/3: 加载 BrainVision 数据...")
+                            sub_name = vhdr_file.name.split('_')[0]
+                            tmpdir = f"{DATA_DIR}/_up/eeg"
+                            with open(f"{tmpdir}/{sub_name}.vhdr", 'wb') as f:
+                                f.write(vhdr_file.getbuffer())
+                            with open(f"{tmpdir}/{sub_name}.eeg", 'wb') as f:
+                                f.write(eeg_file.getbuffer())
+                            if vmrk_file:
+                                with open(f"{tmpdir}/{sub_name}.vmrk", 'wb') as f: f.write(vmrk_file.getbuffer())
+                            if events_file:
+                                with open(f"{tmpdir}/{sub_name}_events.tsv", 'wb') as f: f.write(
+                                    events_file.getbuffer())
+                            raw = mne.io.read_raw_brainvision(f"{tmpdir}/{sub_name}.vhdr", preload=True, verbose=False)
+
+                        # 通用处理
+                        eeg_chs = [ch for ch in raw.ch_names
+                                   if raw.get_channel_types(picks=[ch])[0] == 'eeg'
+                                   and ch not in ('EP1', 'EP2', 'ECG', 'EOG')]
+                        if len(eeg_chs) < 2:
+                            eeg_chs = [ch for ch in raw.ch_names if ch not in ('EP1', 'EP2', 'ECG', 'EOG')]
+                        raw.pick(eeg_chs).resample(SFREQ_TARGET, verbose=False)
+                        raw.filter(0.5, 30, fir_design='firwin', verbose=False)
+
+                        status.update(label="步骤 2/3: 提取事件...")
+                        # 优先用 events.tsv, 其次用 vmrk annotations, 最后用均匀分段
+                        tsv_p = f"{DATA_DIR}/_up/eeg/{sub_name}_events.tsv"
+                        if os.path.exists(tsv_p):
+                            df_ev = pd.read_csv(tsv_p, sep='\t')
+                        else:
+                            try:
+                                ev, _ = mne.events_from_annotations(raw, verbose=False)
+                                df_ev = pd.DataFrame({'onset': ev[:, 0] / raw.info['sfreq'], 'value': ev[:, 2]})
+                            except:
+                                df_ev = None
+
+                        if df_ev is not None and 'value' in df_ev.columns and df_ev['value'].between(7, 12).any():
+                            speech_df = df_ev[df_ev['value'].between(7, 12)]
+                        elif df_ev is not None and len(df_ev) > 0:
+                            speech_df = df_ev.head(40)
+                        else:
+                            # 等距生成伪事件
+                            n = min(40, int(raw.times[-1] / 2))
+                            speech_df = pd.DataFrame({'onset': np.linspace(1, raw.times[-1] - 1, n), 'value': [7] * n})
+
+                        eid_map = {}
+                        mne_ev = []
+                        for _, row in speech_df.iterrows():
+                            onset, val = float(row['onset']), int(row.get('value', 7))
+                            sample = int(round(onset * SFREQ_TARGET))
+                            name = SPEECH_LABELS.get(val, f'cond_{val}')
+                            if name not in eid_map: eid_map[name] = len(eid_map) + 1
+                            mne_ev.append([sample, 0, eid_map[name]])
+                        mne_ev = np.array(mne_ev)
+
+                        status.update(label="步骤 3/3: 创建 Epochs & 保存...")
+                        epochs = mne.Epochs(raw, mne_ev, event_id=eid_map, tmin=-0.2, tmax=0.8,
+                                            baseline=(-0.2, 0), preload=True, reject=None, verbose=False)
+                        out = f"{PREPROC_DIR}/{sub_name}_caep_epochs-epo.fif"
+                        epochs.save(out, overwrite=True)
+
+                        sm = load_summary() or []
+                        sm.append({'sub_id': sub_name, 'n_epochs': len(epochs), 'n_channels': len(eeg_chs),
+                                   'ch_names': eeg_chs, 'sfreq': SFREQ_TARGET, 'speech_types': list(eid_map.keys())})
+                        with open(f"{PREPROC_DIR}/summary.pkl", 'wb') as f:
+                            pickle.dump(sm, f)
+
+                        status.update(label=f"完成! {sub_name}: {len(epochs)} epochs", state="complete")
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.success(f"预处理成功! {sub_name} 已加入")
+                        st.balloons()
+
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                        st.session_state['show_upload'] = False
+                        st.rerun()
+                    except Exception as e:
+                        status.update(label=f"失败: {e}", state="error")
+                        st.error(f"预处理出错: {e}")
+
+        #st.info("提示: 如需演示, 可下载 DS004356 公开数据集放到 data/ 目录, 运行 preprocess.py 批量处理后使用")
+        #st.session_state['show_upload'] = False
+    #后续上传
+    else:
+        with st.expander("上传原始 EEG 数据", expanded=True):
+            ut1, ut2 = st.tabs(["BrainVision", "EDF/BDF"])
+            with ut1:
+                uc1, uc2 = st.columns(2)
+                with uc1: u_vhdr = st.file_uploader(".vhdr (必需)", type=['vhdr'], key='s_vhdr')
+                with uc2: u_eeg = st.file_uploader(".eeg (必需)", type=['eeg'], key='s_eeg')
+                u_vmrk = st.file_uploader(".vmrk (可选)", type=['vmrk'], key='s_vmrk')
+                u_evts = st.file_uploader("events.tsv (可选)", type=['tsv'], key='s_tsv')
+                ready_bv = u_vhdr and u_eeg
+            with ut2:
+                u_edf = st.file_uploader("选择 .edf/.bdf 文件", type=['edf','bdf'], key='s_edf')
+                ready_bv = ready_bv or bool(u_edf)
+
+            if ready_bv:
+                if st.button("开始自动预处理", type="primary"):
+                    with st.status("处理中...", expanded=True) as s:
+                        try:
+                            os.makedirs(f"{DATA_DIR}/_up/eeg", exist_ok=True)
+                            if u_edf:
+                                sn = u_edf.name.rsplit('.',1)[0]
+                                with open(f"{DATA_DIR}/_up/{sn}.edf",'wb') as f: f.write(u_edf.getbuffer())
+                                raw = mne.io.read_raw_edf(f"{DATA_DIR}/_up/{sn}.edf", preload=True, verbose=False)
+                            else:
+                                sn = u_vhdr.name.split('_')[0]
+                                for fo, ex in [(u_vhdr,'vhdr'),(u_eeg,'eeg')]:
+                                    with open(f"{DATA_DIR}/_up/eeg/{sn}.{ex}",'wb') as f: f.write(fo.getbuffer())
+                                if u_vmrk:
+                                    with open(f"{DATA_DIR}/_up/eeg/{sn}.vmrk",'wb') as f: f.write(u_vmrk.getbuffer())
+                                if u_evts:
+                                    with open(f"{DATA_DIR}/_up/eeg/{sn}_events.tsv",'wb') as f: f.write(u_evts.getbuffer())
+                                raw = mne.io.read_raw_brainvision(f"{DATA_DIR}/_up/eeg/{sn}.vhdr", preload=True, verbose=False)
+                            chs=[c for c in raw.ch_names if c not in ('EP1','EP2','ECG','EOG')]
+                            raw.pick(chs[:min(len(chs),64)]).resample(500,verbose=False).filter(0.5,30,fir_design='firwin',verbose=False)
+                            tsv_p=f"{DATA_DIR}/_up/eeg/{sn}_events.tsv"
+                            if os.path.exists(tsv_p):
+                                df=pd.read_csv(tsv_p,sep='\t')
+                            else:
+                                df=pd.DataFrame({'onset':np.linspace(1,raw.times[-1]-1,min(40,int(raw.times[-1]/2))),'value':[7]*min(40,int(raw.times[-1]/2))})
+                            sd=df[df['value'].between(7,12)] if 'value' in df.columns else df
+                            eid={}; me=[]
+                            for _,r in sd.iterrows():
+                                name=SPEECH_LABELS.get(int(r.get('value',7)),'cond')
+                                if name not in eid: eid[name]=len(eid)+1
+                                me.append([int(round(float(r['onset'])*500)),0,eid[name]])
+                            me=np.array(me)
+                            ep=mne.Epochs(raw,me,event_id=eid,tmin=-0.2,tmax=0.8,baseline=(-0.2,0),preload=True,reject=None,verbose=False)
+                            ep.save(f"{PREPROC_DIR}/{sn}_caep_epochs-epo.fif",overwrite=True)
+                            sm=load_summary() or []; sm.append({'sub_id':sn,'n_epochs':len(ep),'n_channels':len(chs),'ch_names':chs,'sfreq':500,'speech_types':list(eid.keys())})
+                            with open(f"{PREPROC_DIR}/summary.pkl",'wb') as f: pickle.dump(sm,f)
+                            s.update(label=f"完成: {sn} ({len(ep)} epochs)",state="complete")
+                            st.cache_resource.clear(); st.cache_data.clear()
+                            st.session_state['show_upload']=False; st.rerun()
+                        except Exception as e:
+                            s.update(label=f"失败: {e}",state="error")
+
+summary = load_summary()
+if summary is None and flag==0:
+    st.info("请上传 EEG 数据文件开始分析")
+
+if summary is None:
+    # 截断后续渲染
+    st.stop()
+
 # ---- 分析参数 ----
 st.sidebar.markdown("---")
 st.sidebar.subheader("分析参数")
-summary = load_summary()
-if summary is None:
-    st.info("请上传 EEG 数据文件开始分析")
-    st.stop()
 
 sub_ids = [s['sub_id'] for s in summary]
 sel_subs = st.sidebar.multiselect(f"被试 ({len(sub_ids)}人可用)", sub_ids,
@@ -290,176 +498,6 @@ st.sidebar.subheader("听阈模拟")
 snr_level = st.sidebar.slider("SNR (dB)", -20, 40, 10, 1,
                                help="信噪比越低 = 模拟听力损失越严重",
                                key='snr_slider')
-
-# ==================== 主界面 ====================
-st.title("CAEP 皮层听觉诱发电位 — 听力筛查分析系统")
-
-if summary is None or len(summary) == 0:
-    # ---- 无数据时: 显示上传引导页 ----
-    st.markdown("## 上传原始 EEG 数据开始分析")
-    st.markdown("支持 **BrainVision** (.vhdr+.eeg)、**EDF/BDF** (.edf)")
-
-    upload_tab1, upload_tab2 = st.tabs(["BrainVision", "EDF/BDF"])
-
-    with upload_tab1:
-        st.caption("上传 .vhdr 头文件 + .eeg 数据文件 (.vmrk 可选)")
-        bv1, bv2 = st.columns(2)
-        with bv1: vhdr_file = st.file_uploader(".vhdr (必需)", type=['vhdr'], key='main_vhdr')
-        with bv2: eeg_file = st.file_uploader(".eeg (必需)", type=['eeg'], key='main_eeg')
-        vmrk_file = st.file_uploader(".vmrk (可选, 未上传则用 events.tsv 或自动生成)", type=['vmrk'], key='main_vmrk')
-        events_file = st.file_uploader("events.tsv (可选)", type=['tsv'], key='main_events')
-        ready = vhdr_file and eeg_file
-
-    with upload_tab2:
-        st.caption("上传单个 EDF/BDF 文件")
-        edf_file = st.file_uploader("选择 .edf 或 .bdf 文件", type=['edf','bdf'], key='main_edf')
-        ready = ready or bool(edf_file)
-
-    if ready:
-        if st.button("开始自动预处理", type="primary", use_container_width=True):
-            with st.status("自动预处理中...", expanded=True) as status:
-                try:
-                    os.makedirs(f"{DATA_DIR}/_up/eeg", exist_ok=True)
-
-                    # 判断格式
-                    if edf_file:
-                        status.update(label="步骤 1/3: 读取 EDF/BDF 文件...")
-                        sub_name = edf_file.name.rsplit('.',1)[0]
-                        tmp_edf = f"{DATA_DIR}/_up/{sub_name}.edf"
-                        with open(tmp_edf, 'wb') as f: f.write(edf_file.getbuffer())
-                        raw = mne.io.read_raw_edf(tmp_edf, preload=True, verbose=False)
-                    else:
-                        status.update(label="步骤 1/3: 加载 BrainVision 数据...")
-                        sub_name = vhdr_file.name.split('_')[0]
-                        tmpdir = f"{DATA_DIR}/_up/eeg"
-                        with open(f"{tmpdir}/{sub_name}.vhdr", 'wb') as f: f.write(vhdr_file.getbuffer())
-                        with open(f"{tmpdir}/{sub_name}.eeg", 'wb') as f: f.write(eeg_file.getbuffer())
-                        if vmrk_file:
-                            with open(f"{tmpdir}/{sub_name}.vmrk", 'wb') as f: f.write(vmrk_file.getbuffer())
-                        if events_file:
-                            with open(f"{tmpdir}/{sub_name}_events.tsv", 'wb') as f: f.write(events_file.getbuffer())
-                        raw = mne.io.read_raw_brainvision(f"{tmpdir}/{sub_name}.vhdr", preload=True, verbose=False)
-
-                    # 通用处理
-                    eeg_chs = [ch for ch in raw.ch_names
-                               if raw.get_channel_types(picks=[ch])[0]=='eeg'
-                               and ch not in ('EP1','EP2','ECG','EOG')]
-                    if len(eeg_chs) < 2:
-                        eeg_chs = [ch for ch in raw.ch_names if ch not in ('EP1','EP2','ECG','EOG')]
-                    raw.pick(eeg_chs).resample(SFREQ_TARGET, verbose=False)
-                    raw.filter(0.5, 30, fir_design='firwin', verbose=False)
-
-                    status.update(label="步骤 2/3: 提取事件...")
-                    # 优先用 events.tsv, 其次用 vmrk annotations, 最后用均匀分段
-                    tsv_p = f"{DATA_DIR}/_up/eeg/{sub_name}_events.tsv"
-                    if os.path.exists(tsv_p):
-                        df_ev = pd.read_csv(tsv_p, sep='\t')
-                    else:
-                        try:
-                            ev, _ = mne.events_from_annotations(raw, verbose=False)
-                            df_ev = pd.DataFrame({'onset': ev[:,0]/raw.info['sfreq'], 'value': ev[:,2]})
-                        except:
-                            df_ev = None
-
-                    if df_ev is not None and 'value' in df_ev.columns and df_ev['value'].between(7,12).any():
-                        speech_df = df_ev[df_ev['value'].between(7,12)]
-                    elif df_ev is not None and len(df_ev) > 0:
-                        speech_df = df_ev.head(40)
-                    else:
-                        # 等距生成伪事件
-                        n = min(40, int(raw.times[-1]/2))
-                        speech_df = pd.DataFrame({'onset': np.linspace(1, raw.times[-1]-1, n), 'value': [7]*n})
-
-                    eid_map = {}
-                    mne_ev = []
-                    for _, row in speech_df.iterrows():
-                        onset, val = float(row['onset']), int(row.get('value',7))
-                        sample = int(round(onset * SFREQ_TARGET))
-                        name = SPEECH_LABELS.get(val, f'cond_{val}')
-                        if name not in eid_map: eid_map[name] = len(eid_map)+1
-                        mne_ev.append([sample, 0, eid_map[name]])
-                    mne_ev = np.array(mne_ev)
-
-                    status.update(label="步骤 3/3: 创建 Epochs & 保存...")
-                    epochs = mne.Epochs(raw, mne_ev, event_id=eid_map, tmin=-0.2, tmax=0.8,
-                                        baseline=(-0.2,0), preload=True, reject=None, verbose=False)
-                    out = f"{PREPROC_DIR}/{sub_name}_caep_epochs-epo.fif"
-                    epochs.save(out, overwrite=True)
-
-                    sm = load_summary() or []
-                    sm.append({'sub_id':sub_name, 'n_epochs':len(epochs), 'n_channels':len(eeg_chs),
-                               'ch_names':eeg_chs, 'sfreq':SFREQ_TARGET, 'speech_types':list(eid_map.keys())})
-                    with open(f"{PREPROC_DIR}/summary.pkl", 'wb') as f: pickle.dump(sm, f)
-
-                    status.update(label=f"完成! {sub_name}: {len(epochs)} epochs", state="complete")
-                    st.cache_resource.clear(); st.cache_data.clear()
-                    st.success(f"预处理成功! {sub_name} 已加入")
-                    st.balloons()
-                except Exception as e:
-                    status.update(label=f"失败: {e}", state="error")
-                    st.error(f"预处理出错: {e}")
-    st.info("提示: 如需演示, 可下载 DS004356 公开数据集放到 data/ 目录, 运行 preprocess.py 批量处理后使用")
-    st.stop()
-
-# ---- 上传新数据面板 (通过侧边栏按钮触发) ----
-if st.session_state.get('show_upload', False):
-    with st.expander("上传原始 EEG 数据", expanded=True):
-        ut1, ut2 = st.tabs(["BrainVision", "EDF/BDF"])
-        with ut1:
-            uc1, uc2 = st.columns(2)
-            with uc1: u_vhdr = st.file_uploader(".vhdr (必需)", type=['vhdr'], key='s_vhdr')
-            with uc2: u_eeg = st.file_uploader(".eeg (必需)", type=['eeg'], key='s_eeg')
-            u_vmrk = st.file_uploader(".vmrk (可选)", type=['vmrk'], key='s_vmrk')
-            u_evts = st.file_uploader("events.tsv (可选)", type=['tsv'], key='s_tsv')
-            ready_bv = u_vhdr and u_eeg
-        with ut2:
-            u_edf = st.file_uploader("选择 .edf/.bdf 文件", type=['edf','bdf'], key='s_edf')
-            ready_bv = ready_bv or bool(u_edf)
-
-        if ready_bv:
-            if st.button("开始自动预处理", type="primary"):
-                with st.status("处理中...", expanded=True) as s:
-                    try:
-                        os.makedirs(f"{DATA_DIR}/_up/eeg", exist_ok=True)
-                        if u_edf:
-                            sn = u_edf.name.rsplit('.',1)[0]
-                            with open(f"{DATA_DIR}/_up/{sn}.edf",'wb') as f: f.write(u_edf.getbuffer())
-                            raw = mne.io.read_raw_edf(f"{DATA_DIR}/_up/{sn}.edf", preload=True, verbose=False)
-                        else:
-                            sn = u_vhdr.name.split('_')[0]
-                            for fo, ex in [(u_vhdr,'vhdr'),(u_eeg,'eeg')]:
-                                with open(f"{DATA_DIR}/_up/eeg/{sn}.{ex}",'wb') as f: f.write(fo.getbuffer())
-                            if u_vmrk:
-                                with open(f"{DATA_DIR}/_up/eeg/{sn}.vmrk",'wb') as f: f.write(u_vmrk.getbuffer())
-                            if u_evts:
-                                with open(f"{DATA_DIR}/_up/eeg/{sn}_events.tsv",'wb') as f: f.write(u_evts.getbuffer())
-                            raw = mne.io.read_raw_brainvision(f"{DATA_DIR}/_up/eeg/{sn}.vhdr", preload=True, verbose=False)
-                        chs=[c for c in raw.ch_names if c not in ('EP1','EP2','ECG','EOG')]
-                        raw.pick(chs[:min(len(chs),64)]).resample(500,verbose=False).filter(0.5,30,fir_design='firwin',verbose=False)
-                        tsv_p=f"{DATA_DIR}/_up/eeg/{sn}_events.tsv"
-                        if os.path.exists(tsv_p):
-                            df=pd.read_csv(tsv_p,sep='\t')
-                        else:
-                            df=pd.DataFrame({'onset':np.linspace(1,raw.times[-1]-1,min(40,int(raw.times[-1]/2))),'value':[7]*min(40,int(raw.times[-1]/2))})
-                        sd=df[df['value'].between(7,12)] if 'value' in df.columns else df
-                        eid={}; me=[]
-                        for _,r in sd.iterrows():
-                            name=SPEECH_LABELS.get(int(r.get('value',7)),'cond')
-                            if name not in eid: eid[name]=len(eid)+1
-                            me.append([int(round(float(r['onset'])*500)),0,eid[name]])
-                        me=np.array(me)
-                        ep=mne.Epochs(raw,me,event_id=eid,tmin=-0.2,tmax=0.8,baseline=(-0.2,0),preload=True,reject=None,verbose=False)
-                        ep.save(f"{PREPROC_DIR}/{sn}_caep_epochs-epo.fif",overwrite=True)
-                        sm=load_summary() or []; sm.append({'sub_id':sn,'n_epochs':len(ep),'n_channels':len(chs),'ch_names':chs,'sfreq':500,'speech_types':list(eid.keys())})
-                        with open(f"{PREPROC_DIR}/summary.pkl",'wb') as f: pickle.dump(sm,f)
-                        s.update(label=f"完成: {sn} ({len(ep)} epochs)",state="complete")
-                        st.cache_resource.clear(); st.cache_data.clear()
-                        st.session_state['show_upload']=False; st.rerun()
-                    except Exception as e:
-                        s.update(label=f"失败: {e}",state="error")
-        if st.button("关闭上传面板"):
-            st.session_state['show_upload'] = False
-            st.rerun()
 
 # ---- 分析界面 ----
 tab_names = ["CAEP 波形", "多维特征", "头皮地形图", "听阈模拟", "电极优化", "群体报告"]
