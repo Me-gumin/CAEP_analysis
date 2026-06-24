@@ -2,7 +2,7 @@
 基于streamlit搭建的快速可视化脑电信号数据
 # Usage
 ## step 1
-<br>安装stream_lit `pip install streamlit`</br>
+<br>安装streamlit `pip install streamlit`</br>
 ## step 2
 <br>clone this project `git clone https://github.com/Me-gumin/CAEP_analysis.git`</br>
 ## step 3
