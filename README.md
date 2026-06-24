@@ -9,5 +9,11 @@ clone本项目 `git clone https://github.com/Me-gumin/CAEP_analysis.git`
 运行app.py
 <br>`cd CAEP_analysis/util`</br>
 `streamlit run app.py`
-## UI
+# UI
+## index
+![image](https://github.com/Me-gumin/CAEP_analysis/blob/main/src/index.png).
+## upload for the first time
+![image](https://github.com/Me-gumin/CAEP_analysis/blob/main/src/upload%20for%20the%20first%20time.png).
+## effect
+![image](https://github.com/Me-gumin/CAEP_analysis/blob/main/src/effect.png).
 
