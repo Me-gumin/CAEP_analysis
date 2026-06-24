@@ -4,12 +4,12 @@
 ## step 1
 安装stream_lit `pip install streamlit`
 ## step 2
-clone本项目 `git clone https://github.com/Me-gumin/CAEP_analysis.git`
+clone this project `git clone https://github.com/Me-gumin/CAEP_analysis.git`
 ## step 3
 运行app.py
 <br>`cd CAEP_analysis/util`</br>
 `streamlit run app.py`
------------------------------------------------------------------------------------
+<br>-----------------------------------------------------------------------------------</br>
 # UI
 ## index
 ![image](https://github.com/Me-gumin/CAEP_analysis/blob/main/src/index.png).
