@@ -8,7 +8,7 @@
 ## step 3
 <br>1.first `cd CAEP_analysis/util`</br>
 <br>2.then `pip install -r requirements.txt`</br>
-<br>3.finally `streamlit run app.py`</br>
+<br>3.finally `streamlit run CAEP_DEMO.py`</br>
 
 ---
 # UI
