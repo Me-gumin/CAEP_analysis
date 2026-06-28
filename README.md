@@ -6,9 +6,10 @@
 ## step 2
 <br>clone this project `git clone https://github.com/Me-gumin/CAEP_analysis.git`</br>
 ## step 3
-<br>1.first `cd CAEP_analysis/util`</br>
+<br>1.first `cd CAEP_analysis`</br>
 <br>2.then `pip install -r requirements.txt`</br>
-<br>3.finally `streamlit run CAEP_DEMO.py`</br>
+<br>3.then `cd utils`</br>
+<br>4.finally `streamlit run CAEP_DEMO.py`</br>
 
 ---
 # UI
