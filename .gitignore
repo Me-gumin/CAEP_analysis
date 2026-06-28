@@ -219,5 +219,5 @@ __marimo__/
 
 #running_time
 preprocessed/
-util/data/
-util/preprocessed/
+utils/data/
+utils/preprocessed/

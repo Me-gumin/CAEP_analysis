@@ -5,8 +5,8 @@ import mne, numpy as np, os, glob, pickle, pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
-DATA_DIR = "data"
-OUT_DIR = "preprocessed"
+DATA_DIR = "../utils/data"
+OUT_DIR = "../utils/preprocessed"
 os.makedirs(OUT_DIR, exist_ok=True)
 SPEECH_VALUES = {7:'chn_aud',8:'eng_aud',9:'interview',10:'lecture',11:'news',12:'talk'}
 TARGET_SFREQ = 500
