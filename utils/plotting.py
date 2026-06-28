@@ -1,19 +1,33 @@
 import numpy as np
 from matplotlib import pyplot as plt
-
+import mne  # 确保在文件顶部导入 mne
 
 
 # ==================== 可视化辅助 ====================
+
 def plot_topo(evoked_data, info, time_ms, ax, title=""):
     from mne.viz import plot_topomap as pt
+    import streamlit as st
     try:
-        t_idx = np.argmin(np.abs(evoked_data.times * 1000 - time_ms))
-        pt(evoked_data.data[:, t_idx], info, axes=ax, show=False,
-           cmap='RdBu_r', outlines='head', sensors=False)
-        ax.set_title(title, fontsize=9)
+        # 1. 先通过类型选取 EEG 通道
+        picks = mne.pick_types(info, meg=False, eeg=True, exclude=[])
 
-    except:
-        ax.text(0.5, 0.5, 'N/A', ha='center', va='center', transform=ax.transAxes)
+        # 2. 再通过名称排除非 EEG 通道（如 EXG, EOG, ECG 等）
+        exclude_names = ['EXG1', 'EXG2']  # 排除肌电，眼电
+        picks = [p for p in picks if info['ch_names'][p] not in exclude_names]
+
+        if len(picks) == 0:
+            raise ValueError("没有可用的 EEG 通道（已排除非 EEG 通道）")
+
+        t_idx = np.argmin(np.abs(evoked_data.times * 1000 - time_ms))
+        data = evoked_data.data[picks, t_idx]
+        info_sub = mne.pick_info(info, picks)
+
+        pt(data, info_sub, axes=ax, show=False, cmap='RdBu_r', outlines='head', sensors=False)
+        ax.set_title(title, fontsize=9)
+    except Exception as e:
+        st.error(f"地形图绘制失败: {e}")
+        ax.text(0.5, 0.5, 'ERROR', ha='center', va='center', transform=ax.transAxes, color='red')
 
 
 def CAEP_Ploting(sel_chs,times_ms,ev,ep,feat,sid):

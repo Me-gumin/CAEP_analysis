@@ -240,6 +240,12 @@ with tab3:
         ep = all_epochs.get(sid)
         if ep is None:
             continue
+
+        # 条件有效性检查
+        if sel_speech != 'all' and sel_speech not in ep.event_id:
+            st.warning(f"被试 {sid} 中不存在条件 '{sel_speech}'，跳过")
+            continue
+
         ev = ep.average() if sel_speech == 'all' else ep[sel_speech].average()
         st.markdown(f"**{sid}**")
         fig, axes = plt.subplots(1, 5, figsize=(18, 3.5))
